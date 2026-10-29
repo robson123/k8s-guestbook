@@ -5,7 +5,7 @@ import * as pulumi from "@pulumi/pulumi";
 // for clusters that don't support `LoadBalancer` services
 const config = new pulumi.Config();
 const useLoadBalancer = config.getBoolean("useLoadBalancer");
-
+const enableFrontendMetrics = config.getBoolean("enableFrontendMetrics") ?? false;
 //
 // REDIS LEADER.
 //
@@ -341,3 +341,158 @@ export const grafanaAdminUser = "admin";
 export const grafanaAdminPasswordOutput = pulumi.secret(
     grafanaAdminPassword,
 );
+
+function createRedisExporter(name: string, redisService: string) {
+    const appLabel = `redis-exporter-${name}`;
+
+    const deployment = new k8s.apps.v1.Deployment(
+        `${appLabel}-deployment`,
+        {
+            metadata: {
+                namespace: "default",
+                labels: { app: appLabel },
+            },
+            spec: {
+                replicas: 1,
+                selector: {
+                    matchLabels: { app: appLabel },
+                },
+                template: {
+                    metadata: {
+                        labels: { app: appLabel },
+                    },
+                    spec: {
+                        containers: [
+                            {
+                                name: "redis-exporter",
+                                image: "oliver006/redis_exporter:v1.74.0",
+                                ports: [
+                                    {
+                                        name: "metrics",
+                                        containerPort: 9121,
+                                    },
+                                ],
+                                env: [
+                                    {
+                                        name: "REDIS_ADDR",
+                                        value:
+                                            `redis://${redisService}.default.svc.cluster.local:6379`,
+                                    },
+                                ],
+                                readinessProbe: {
+                                    httpGet: {
+                                        path: "/metrics",
+                                        port: 9121,
+                                    },
+                                    initialDelaySeconds: 5,
+                                    periodSeconds: 10,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        },
+        { dependsOn: [monitoringStack] },
+    );
+
+    const service = new k8s.core.v1.Service(
+        `${appLabel}-service`,
+        {
+            metadata: {
+                namespace: "default",
+                labels: { app: appLabel },
+            },
+            spec: {
+                type: "ClusterIP",
+                selector: { app: appLabel },
+                ports: [
+                    {
+                        name: "metrics",
+                        port: 9121,
+                        targetPort: 9121,
+                    },
+                ],
+            },
+        },
+        { dependsOn: [deployment] },
+    );
+
+    const serviceMonitor = new k8s.apiextensions.CustomResource(
+        `${appLabel}-servicemonitor`,
+        {
+            apiVersion: "monitoring.coreos.com/v1",
+            kind: "ServiceMonitor",
+            metadata: {
+                name: appLabel,
+                namespace: "monitoring",
+                labels: {
+                    release: "monitoring",
+                },
+            },
+            spec: {
+                namespaceSelector: {
+                    matchNames: ["default"],
+                },
+                selector: {
+                    matchLabels: { app: appLabel },
+                },
+                endpoints: [
+                    {
+                        port: "metrics",
+                        path: "/metrics",
+                        interval: "30s",
+                    },
+                ],
+            },
+        },
+        { dependsOn: [monitoringStack, service] },
+    );
+
+    return { deployment, service, serviceMonitor };
+}
+
+const redisLeaderMonitoring = createRedisExporter(
+    "leader",
+    "redis-leader",
+);
+
+const redisReplicaMonitoring = createRedisExporter(
+    "replica",
+    "redis-replica",
+);
+
+if (enableFrontendMetrics) {
+    new k8s.apiextensions.CustomResource(
+        "guestbook-frontend-servicemonitor",
+        {
+            apiVersion: "monitoring.coreos.com/v1",
+            kind: "ServiceMonitor",
+            metadata: {
+                name: "guestbook-frontend",
+                namespace: "monitoring",
+                labels: {
+                    release: "monitoring",
+                },
+            },
+            spec: {
+                namespaceSelector: {
+                    matchNames: ["default"],
+                },
+                selector: {
+                    matchLabels: {
+                        app: "frontend",
+                    },
+                },
+                endpoints: [
+                    {
+                        port: "http",
+                        path: "/metrics",
+                        interval: "30s",
+                    },
+                ],
+            },
+        },
+        { dependsOn: [monitoringStack] },
+    );
+}
