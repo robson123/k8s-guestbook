@@ -1,0 +1,5 @@
+config:
+  k8s-guestbook:useLoadBalancer: "false"
+  kubernetes:context: kind-guestbook
+  k8s-guestbook:grafanaAdminPassword:
+    secure: AAABAIImU1kH49psd2LS9DmFjnNUd+nm1tuidNo2cMRjayBHNtJkDSozCYuVDSDc4bmAw2PSQSvGNbHANNvwSQ==
